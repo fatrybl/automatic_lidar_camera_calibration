@@ -89,10 +89,13 @@ template <typename POINT_CLOUD_TYPE> class CalibrationHandler
     std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> projectOnPointCloud(const TransformInfo& transform) const;
 
  private:
+ public:  // fork: made public so the objective can be read at a given pose instead of optimised
     /**
      *  @brief calculate MI cost with the current param
      */
     double calculateMICost(const TransformInfo& transform);
+
+ private:
     DeltaTransformInfo step(const double prevCost, const TransformInfo& transform,
                             const CalibrationHandlerParam& param);
 
