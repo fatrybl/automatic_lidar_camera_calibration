@@ -44,7 +44,6 @@ CalibrationHandlerParam getCalibrationHandlerParam(const std::string& jsonPath)
     param.sigmaSpace = getValueAs<double>(jsonDoc, "sigma_space");
     param.normalizeMI = getValueAs<bool>(jsonDoc, "normalize_mi");
     param.probabilityEstimatorType = getValueAs<int>(jsonDoc, "probability_estimator_type");
-    param.useBayes = getValueAs<bool>(jsonDoc, "use_bayes");
 
     return param;
 }
@@ -61,6 +60,10 @@ template <> void validate<CalibrationHandlerParam>(const CalibrationHandlerParam
 
     if (param.pathToCameraInfo.empty()) {
         throw std::runtime_error("empty path to camera info");
+    }
+
+    if (param.probabilityEstimatorType != ESTIMATOR_KDE && param.probabilityEstimatorType != ESTIMATOR_JAMES_STEIN) {
+        throw std::runtime_error("probability_estimator_type must be 0 (kernel density estimate) or 1 (James-Stein)");
     }
 }
 }  // namespace perception

@@ -5,115 +5,155 @@
  *
  */
 
+#include <algorithm>
+#include <cmath>
+
+#include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
 
 #include <sensors_calib/ProbabilityHandler.hpp>
 #include <sensors_calib/utils/utils.hpp>
 
+namespace
+{
+constexpr double KERNEL_VARIANCE_FLOOR = 1e-2;  // squared bins; keeps the kernel invertible when a variable is constant
+constexpr double KERNEL_RADIUS_IN_STDS = 4.0;
+
+double entropy(const cv::Mat& probability)
+{
+    double value = 0.0;
+    for (auto it = probability.begin<double>(); it != probability.end<double>(); ++it) {
+        if (*it > 0.0) {
+            value -= *it * std::log(*it);
+        }
+    }
+    return value;
+}
+}  // namespace
+
 namespace perception
 {
 ProbabilityHandler::ProbabilityHandler(int numBins)
     : m_numBins(numBins)
+    , m_totalPoints(0)
 {
     if (m_numBins <= 0 || m_numBins > perception::MAX_BINS) {
         throw std::runtime_error("invalid number of bins");
     }
 
-    m_grayProb = Probability::zeros(1, m_numBins, CV_64FC1);
-    m_intensityProb = Probability::zeros(1, m_numBins, CV_64FC1);
-    m_jointProb = JointProbability::zeros(m_numBins, m_numBins, CV_64FC1);
+    this->reset(0);
 }
 
 ProbabilityHandler::~ProbabilityHandler()
 {
 }
 
-bool ProbabilityHandler::estimateMLE(const HistogramHandler::Ptr& histogram, const bool bayes)
+bool ProbabilityHandler::estimateKDE(const HistogramHandler::Ptr& histogram)
 {
-    if (histogram->totalPoints() == 0) {
-        DEBUG_LOG("empty sample datas");
+    this->reset(histogram->totalPoints());
+    if (m_totalPoints < 2) {
+        DEBUG_LOG("need at least two samples");
         return false;
     }
-    m_totalPoints = histogram->totalPoints();
-    double aJoint = bayes ? m_numBins * m_numBins : 0.0;
-    double aMargin = bayes ? m_numBins : 0.0;
 
+    const cv::Mat& counts = histogram->jointHist();
+    const double n = m_totalPoints;
+    double sumGray = 0, sumIntensity = 0, sumGrayGray = 0, sumIntensityIntensity = 0, sumGrayIntensity = 0;
     for (int i = 0; i < m_numBins; ++i) {
         for (int j = 0; j < m_numBins; ++j) {
-            m_jointProb.at<double>(i, j) = histogram->jointHist().at<double>(i, j) / (m_totalPoints + aJoint);
+            const double count = counts.at<double>(i, j);
+            sumGray += count * i;
+            sumIntensity += count * j;
+            sumGrayGray += count * i * i;
+            sumIntensityIntensity += count * j * j;
+            sumGrayIntensity += count * i * j;
         }
-
-        m_grayProb.at<double>(i) = histogram->grayHist().at<double>(i) / (m_totalPoints + aMargin);
-        m_intensityProb.at<double>(i) = histogram->intensityHist().at<double>(i) / (m_totalPoints + aMargin);
     }
 
-    auto stds = histogram->calculateStds();
-    double sigmaGray = stds[0];
-    double sigmaIntensity = stds[1];
+    // sample covariance of the observations in bins, ordered (grey value, reflectivity)
+    Eigen::Matrix2d covariance;
+    covariance(0, 0) = (sumGrayGray - sumGray * sumGray / n) / (n - 1);
+    covariance(1, 1) = (sumIntensityIntensity - sumIntensity * sumIntensity / n) / (n - 1);
+    covariance(0, 1) = (sumGrayIntensity - sumGray * sumIntensity / n) / (n - 1);
+    covariance(1, 0) = covariance(0, 1);
 
-    // bandwidths for kernel density estimation based on Silverman's rule of thumb
-    m_sigmaGrayBandwidth = 1.06 * std::sqrt(sigmaGray) / std::pow(m_totalPoints, 0.2);
-    m_sigmaIntensityBandwidth = 1.06 * std::sqrt(sigmaIntensity) / std::pow(m_totalPoints, 0.2);
+    // kernel covariance Omega Omega^T for the bandwidth matrix Omega = n^(-1/6) Sigma^(1/2)
+    const Eigen::Matrix2d kernelCovariance =
+        std::pow(n, -1.0 / 3.0) * covariance + KERNEL_VARIANCE_FLOOR * Eigen::Matrix2d::Identity();
+    const Eigen::Matrix2d precision = kernelCovariance.inverse();
+    const int grayRadius = std::min(
+        m_numBins - 1, static_cast<int>(std::ceil(KERNEL_RADIUS_IN_STDS * std::sqrt(kernelCovariance(0, 0)))));
+    const int intensityRadius = std::min(
+        m_numBins - 1, static_cast<int>(std::ceil(KERNEL_RADIUS_IN_STDS * std::sqrt(kernelCovariance(1, 1)))));
 
-    this->smoothKDE();
+    cv::Mat kernel(2 * grayRadius + 1, 2 * intensityRadius + 1, CV_64FC1);
+    for (int di = -grayRadius; di <= grayRadius; ++di) {
+        for (int dj = -intensityRadius; dj <= intensityRadius; ++dj) {
+            const Eigen::Vector2d offset(di, dj);
+            kernel.at<double>(di + grayRadius, dj + intensityRadius) = std::exp(-0.5 * offset.dot(precision * offset));
+        }
+    }
+    kernel /= cv::sum(kernel)[0];
+
+    // the kernel is symmetric, so the correlation of filter2D is the convolution; probability mass that would leave
+    // [0, 255] is reflected back at the border
+    const cv::Mat frequencies = counts / n;
+    cv::filter2D(frequencies, m_jointProb, CV_64F, kernel, cv::Point(-1, -1), 0.0, cv::BORDER_REFLECT);
+    m_jointProb /= cv::sum(m_jointProb)[0];
+    this->updateMarginals();
 
     return true;
 }
 
-bool ProbabilityHandler::estimateJS(const HistogramHandler::Ptr& histogram, const bool bayes)
+bool ProbabilityHandler::estimateJS(const HistogramHandler::Ptr& histogram)
 {
-    if (!this->estimateMLE(histogram, bayes)) {
+    this->reset(histogram->totalPoints());
+    if (m_totalPoints < 2) {
+        DEBUG_LOG("need at least two samples");
         return false;
     }
 
-    double squareSumMLE = std::pow(cv::norm(m_jointProb), 2);
-
-    cv::Mat jointTarget = cv::Mat::eye(m_numBins, m_numBins, CV_64FC1) / (m_numBins);
-    cv::Mat grayTarget = cv::Mat::ones(1, m_numBins, CV_64FC1) / m_numBins;
-    cv::Mat intensityTarget = cv::Mat::ones(1, m_numBins, CV_64FC1) / m_numBins;
-    double squareDiffMLETarget = std::pow(cv::norm(jointTarget, m_jointProb), 2);
-
-    double lambda = (1.0 - squareSumMLE) / squareDiffMLETarget / (m_totalPoints - 1);
-    lambda = std::clamp(lambda, 0.0, 1.0);
-    m_jointProb = jointTarget * lambda + m_jointProb * (1.0 - lambda);
-    m_grayProb = grayTarget * lambda + m_grayProb * (1.0 - lambda);
-    m_intensityProb = intensityTarget * lambda + m_intensityProb * (1.0 - lambda);
+    // lambda = (1 - sum f^2) / ((n - 1) sum (1/K - f)^2) over the K = numBins^2 cells, with sum (1/K - f)^2 = sum f^2 - 1/K
+    // fork: the upstream target was the identity matrix / numBins (perfectly correlated variables), applied after the
+    // kernel smoothing, which inflated the mutual information by an amount that depends on n
+    const double cells = static_cast<double>(m_numBins) * m_numBins;
+    const cv::Mat frequencies = histogram->jointHist() / static_cast<double>(m_totalPoints);
+    const double sumSquares = frequencies.dot(frequencies);
+    const double distanceToTarget = sumSquares - 1.0 / cells;
+    const double lambda = distanceToTarget > 0.0
+                              ? std::clamp((1.0 - sumSquares) / ((m_totalPoints - 1) * distanceToTarget), 0.0, 1.0)
+                              : 1.0;
+    m_jointProb = frequencies * (1.0 - lambda) + cv::Scalar(lambda / cells);
+    this->updateMarginals();
 
     return true;
 }
 
 double ProbabilityHandler::calculateMICost(const bool normalize) const
 {
-    double grayEntropy = 0.0, intensityEntropy = 0.0, jointEntropy = 0.0;
-
-    for (int i = 0; i < m_numBins; ++i) {
-        for (int j = 0; j < m_numBins; ++j) {
-            double jointV = m_jointProb.at<double>(i, j);
-            if (!perception::almostEquals(jointV, 0.0)) {
-                jointEntropy += -jointV * std::log2(jointV);
-            }
-        }
-        double grayV = m_grayProb.at<double>(i);
-        double intensityV = m_intensityProb.at<double>(i);
-
-        if (!perception::almostEquals(grayV, 0.0)) {
-            grayEntropy += -grayV * std::log2(grayV);
-        }
-        if (!perception::almostEquals(intensityV, 0.0)) {
-            intensityEntropy += -intensityV * std::log2(intensityV);
-        }
+    // fork: natural logarithm, as in eqs. 2-4 (upstream: log2)
+    const double grayEntropy = entropy(m_grayProb);
+    const double intensityEntropy = entropy(m_intensityProb);
+    const double mutualInformation = grayEntropy + intensityEntropy - entropy(m_jointProb);
+    if (!normalize) {
+        return mutualInformation;
     }
 
-    double mutualInformation = grayEntropy + intensityEntropy - jointEntropy;
-    double normalizedMutualInformation = 2 * mutualInformation / (grayEntropy + intensityEntropy);
-
-    return normalize ? normalizedMutualInformation : mutualInformation;
+    const double marginalEntropy = grayEntropy + intensityEntropy;
+    return marginalEntropy > 0.0 ? 2.0 * mutualInformation / marginalEntropy : 0.0;
 }
 
-void ProbabilityHandler::smoothKDE()
+void ProbabilityHandler::reset(const int totalPoints)
 {
-    cv::GaussianBlur(m_grayProb, m_grayProb, cv::Size(0, 0), m_sigmaGrayBandwidth);
-    cv::GaussianBlur(m_intensityProb, m_intensityProb, cv::Size(0, 0), m_sigmaIntensityBandwidth);
-    cv::GaussianBlur(m_jointProb, m_jointProb, cv::Size(0, 0), m_sigmaGrayBandwidth, m_sigmaIntensityBandwidth);
+    m_totalPoints = totalPoints;
+    m_grayProb = Probability::zeros(m_numBins, 1, CV_64FC1);
+    m_intensityProb = Probability::zeros(1, m_numBins, CV_64FC1);
+    m_jointProb = JointProbability::zeros(m_numBins, m_numBins, CV_64FC1);
+}
+
+void ProbabilityHandler::updateMarginals()
+{
+    cv::reduce(m_jointProb, m_grayProb, 1, cv::REDUCE_SUM, CV_64F);
+    cv::reduce(m_jointProb, m_intensityProb, 0, cv::REDUCE_SUM, CV_64F);
 }
 }  // namespace perception

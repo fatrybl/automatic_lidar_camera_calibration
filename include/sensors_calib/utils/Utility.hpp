@@ -8,6 +8,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -48,13 +49,34 @@ inline cv::Scalar colorCodingReflectivityBGR(const int intensity)
 
 TransformInfo getTransformInfo(const std::string transformationInfoPath);
 
+/**
+ *  @brief project a point given in the camera frame with the pinhole model (eq. 5 of Pandey et al., AAAI 2012) and
+ *  round it to the nearest pixel
+ *
+ *  @return false for a point that is not co-observed: behind the camera or outside the image (fork: the upstream
+ *  projection had no depth test, so points behind the camera landed on mirrored pixels)
+ */
 template <typename PointCloudType>
-cv::Point projectToImagePlane(const PointCloudType& point3d, const CameraInfo& cameraInfo)
+bool projectToPixel(const PointCloudType& point3d, const CameraInfo& cameraInfo, const cv::Size& imageSize,
+                    cv::Point& pixel)
 {
-    Eigen::Matrix<double, 3, 1> point(point3d.x, point3d.y, point3d.z);
-    Eigen::Matrix<double, 3, 1> point2d = cameraInfo.K() * point;  // homogenous coordinate of 2d point
+    if (!std::isfinite(point3d.x) || !std::isfinite(point3d.y) || !std::isfinite(point3d.z)) {
+        return false;
+    }
 
-    return cv::Point(point2d(0) / point2d(2), point2d(1) / point2d(2));
+    const Eigen::Vector3d point2d = cameraInfo.K() * Eigen::Vector3d(point3d.x, point3d.y, point3d.z);
+    if (point2d(2) <= 0) {
+        return false;
+    }
+
+    const double u = point2d(0) / point2d(2);
+    const double v = point2d(1) / point2d(2);
+    if (u < -0.5 || u >= imageSize.width - 0.5 || v < -0.5 || v >= imageSize.height - 0.5) {
+        return false;
+    }
+
+    pixel = cv::Point(cvRound(u), cvRound(v));
+    return true;
 }
 
 template <typename PointCloudType>
@@ -66,13 +88,9 @@ cv::Mat drawPointCloudOnImagePlane(const cv::Mat& img, const typename pcl::Point
     pcl::transformPointCloud(*inCloud, *alignedCloud, affine.matrix());
 
     cv::Mat visualizedImg = img.clone();
+    cv::Point imgPoint;
     for (const auto& point : alignedCloud->points) {
-        if (isnan(point.x) || isnan(point.y) || isnan(point.z)) {
-            continue;
-        }
-
-        cv::Point imgPoint = projectToImagePlane<PointCloudType>(point, cameraInfo);
-        if (imgPoint.x < 0 || imgPoint.x >= img.cols || imgPoint.y < 0 || imgPoint.y >= img.rows) {
+        if (!projectToPixel(point, cameraInfo, img.size(), imgPoint)) {
             continue;
         }
 
@@ -91,14 +109,10 @@ projectOnPointCloud(const cv::Mat& img, const typename pcl::PointCloud<PointClou
     pcl::transformPointCloud(*inCloud, *alignedCloud, affine.matrix());
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr outCloud(new pcl::PointCloud<pcl::PointXYZRGB>);
 
+    cv::Point imgPoint;
     for (std::size_t i = 0; i < inCloud->points.size(); ++i) {
         const auto& origPoint = inCloud->points[i];
-        const auto& alignedPoint = alignedCloud->points[i];
-        if (isnan(alignedPoint.x) || isnan(alignedPoint.y) || isnan(alignedPoint.z)) {
-            continue;
-        }
-        cv::Point imgPoint = projectToImagePlane<PointCloudType>(alignedPoint, cameraInfo);
-        if (imgPoint.x < 0 || imgPoint.x >= img.cols || imgPoint.y < 0 || imgPoint.y >= img.rows) {
+        if (!projectToPixel(alignedCloud->points[i], cameraInfo, img.size(), imgPoint)) {
             continue;
         }
 

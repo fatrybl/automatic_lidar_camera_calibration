@@ -32,12 +32,17 @@ int main(int argc, char* argv[])
         new perception::CalibrationHandler<PointCloudType>(param));
 
     auto transform = calibrationHandler->optimize();
+    const auto crlb = calibrationHandler->calculateCRLB(transform);
     const auto visualizedImgs = calibrationHandler->drawPointCloudOnImagePlane(transform);
     const auto projectedClouds = calibrationHandler->projectOnPointCloud(transform);
 
+    const double radian = boost::math::double_constants::radian;
     printf("x: %f[m], y: %f[m], z: %f[m], r: %f[deg], p: %f[deg], y_deg: %f[deg]\n", transform(0), transform(1),
-           transform(2), transform(3) * boost::math::double_constants::radian,
-           transform(4) * boost::math::double_constants::radian, transform(5) * boost::math::double_constants::radian);
+           transform(2), transform(3) * radian, transform(4) * radian, transform(5) * radian);
+    // fork: the uncertainty of the estimate from the Cramer-Rao lower bound (eqs. 12-14)
+    printf("CRLB std: x: %f[m], y: %f[m], z: %f[m], r: %f[deg], p: %f[deg], y: %f[deg]\n", std::sqrt(crlb(0, 0)),
+           std::sqrt(crlb(1, 1)), std::sqrt(crlb(2, 2)), std::sqrt(crlb(3, 3)) * radian, std::sqrt(crlb(4, 4)) * radian,
+           std::sqrt(crlb(5, 5)) * radian);
 
     for (std::size_t i = 0; i < visualizedImgs.size(); ++i) {
         const auto& curImg = visualizedImgs[i];

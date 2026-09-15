@@ -21,12 +21,15 @@
 
 namespace perception
 {
+/**
+ *  @brief joint histogram of the grey value Y and the laser reflectivity X of the points co-observed by the laser
+ *  scanner and the camera, accumulated over every scan-image pair (Pandey et al., AAAI 2012, section 2.2)
+ */
 class HistogramHandler
 {
  public:
     using Ptr = std::shared_ptr<HistogramHandler>;
 
-    using Histogram = cv::Mat;
     using JointHistogram = cv::Mat;
 
     explicit HistogramHandler(int numBins);
@@ -38,44 +41,34 @@ class HistogramHandler
                 const CameraInfo& cameraInfo, const Eigen::Affine3d& affine = Eigen::Affine3d::Identity());
 
     template <typename PointCloudType>
-    bool update(const cv::Mat& grayImgs, const typename pcl::PointCloud<PointCloudType>::Ptr& inClouds,
+    bool update(const cv::Mat& grayImg, const typename pcl::PointCloud<PointCloudType>::Ptr& inCloud,
                 const CameraInfo& cameraInfo, const Eigen::Affine3d& affine = Eigen::Affine3d::Identity());
 
-    // image gray, lidar pointcloud intensity, join histogram standard deviation
-    std::array<double, 2> calculateStds() const;
+    /**
+     *  @brief add one co-observation: a grey value and a reflectivity, both in [0, 255]
+     */
+    void addSample(int grayValue, double reflectivity);
+
+    int numBins() const
+    {
+        return m_numBins;
+    }
 
     int totalPoints() const
     {
         return m_totalPoints;
     }
 
-    const Histogram& grayHist() const
-    {
-        return m_grayHist;
-    }
-
-    const Histogram& intensityHist() const
-    {
-        return m_intensityHist;
-    }
-
+    // rows: grey-value bin, columns: reflectivity bin
     const JointHistogram& jointHist() const
     {
         return m_jointHist;
     }
 
  private:
-    bool validateImagePoint(const cv::Mat& img, const cv::Point& point);
-
- public:
     int m_numBins;
-    int m_binFraction;
-    int m_graySum;
-    int m_intensitySum;
     int m_totalPoints;
 
-    Histogram m_grayHist;
-    Histogram m_intensityHist;
     JointHistogram m_jointHist;
 };
 }  // namespace perception

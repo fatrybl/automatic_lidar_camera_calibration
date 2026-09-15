@@ -44,23 +44,14 @@ bool HistogramHandler::update(const cv::Mat& grayImg, const typename pcl::PointC
     typename pcl::PointCloud<PointCloudType>::Ptr alignedCloud(new pcl::PointCloud<PointCloudType>());
     pcl::transformPointCloud(*inCloud, *alignedCloud, affine.matrix());
 
+    cv::Point imgPoint;
     for (const auto& point : alignedCloud->points) {
-        cv::Point imgPoint = projectToImagePlane(point, cameraInfo);
-        if (!this->validateImagePoint(grayImg, imgPoint)) {
+        // only co-observed points: in front of the camera and inside the image
+        if (!projectToPixel(point, cameraInfo, grayImg.size(), imgPoint)) {
             continue;
         }
 
-        int intensityBin = point.intensity / m_binFraction;
-        int grayBin = grayImg.ptr<uchar>(imgPoint.y)[imgPoint.x] / m_binFraction;
-
-        m_intensityHist.at<double>(intensityBin)++;
-        m_grayHist.at<double>(grayBin)++;
-        m_jointHist.at<double>(grayBin, intensityBin)++;
-
-        m_intensitySum += intensityBin;
-        m_graySum += grayBin;
-
-        m_totalPoints++;
+        this->addSample(grayImg.ptr<uchar>(imgPoint.y)[imgPoint.x], point.intensity);
     }
 
     return true;

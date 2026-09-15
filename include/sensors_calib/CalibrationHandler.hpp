@@ -25,6 +25,9 @@
 
 namespace perception
 {
+static constexpr int ESTIMATOR_KDE = 0;          // kernel density estimate (Pandey et al., AAAI 2012)
+static constexpr int ESTIMATOR_JAMES_STEIN = 1;  // James-Stein shrinkage (Hausser and Strimmer 2009)
+
 struct CalibrationHandlerParam {
     std::string pathToInitialGuess = "";
     std::string pathToImages = "";
@@ -54,16 +57,15 @@ struct CalibrationHandlerParam {
 
     double epsilon = 1e-9;  // epsilon to avoid division by 0
 
-    // filter input images
-    bool filterInputImage = true;  // use bilateral filter
+    // filter input images (fork: off by default, the paper uses the grey image as captured)
+    bool filterInputImage = false;  // use bilateral filter
     int filterDiameter = 15;
     double sigmaColor = 75;
     double sigmaSpace = 75;
 
     // mutual information related params
     bool normalizeMI = false;
-    int probabilityEstimatorType = 0;
-    bool useBayes = false;
+    int probabilityEstimatorType = ESTIMATOR_KDE;
 };
 
 CalibrationHandlerParam getCalibrationHandlerParam(const std::string& jsonPath);
@@ -78,6 +80,7 @@ template <typename POINT_CLOUD_TYPE> class CalibrationHandler
 
     using Ptr = std::shared_ptr<CalibrationHandler>;
     using DeltaTransformInfo = TransformInfo;
+    using ParameterCovariance = Eigen::Matrix<double, 6, 6>;
 
  public:
     explicit CalibrationHandler(const CalibrationHandlerParam& param);
@@ -88,14 +91,25 @@ template <typename POINT_CLOUD_TYPE> class CalibrationHandler
     std::vector<cv::Mat> drawPointCloudOnImagePlane(const TransformInfo& transform) const;
     std::vector<pcl::PointCloud<pcl::PointXYZRGB>::Ptr> projectOnPointCloud(const TransformInfo& transform) const;
 
- private:
- public:  // fork: made public so the objective can be read at a given pose instead of optimised
     /**
-     *  @brief calculate MI cost with the current param
+     *  @brief mutual information of reflectivity and grey value over every scan-image pair at a transform (eq. 8);
+     *  fork: public, so the objective can be read at a given pose instead of optimised
      */
     double calculateMICost(const TransformInfo& transform);
 
+    /**
+     *  @brief number of co-observed points behind the last mutual information
+     */
+    int coObservedPoints() const;
+
+    /**
+     *  @brief Cramer-Rao lower bound on the covariance of (x, y, z, roll, pitch, yaw) at a transform (eqs. 12-14)
+     */
+    ParameterCovariance calculateCRLB(const TransformInfo& transform);
+
  private:
+    cv::Mat estimateJointProbability(const TransformInfo& transform, int estimatorType);
+
     DeltaTransformInfo step(const double prevCost, const TransformInfo& transform,
                             const CalibrationHandlerParam& param);
 
